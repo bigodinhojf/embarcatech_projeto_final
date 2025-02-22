@@ -58,6 +58,7 @@ target_link_libraries(embarcatech_projeto_final
         hardware_i2c
         hardware_adc
         hardware_pwm
+        hardware_timer
         
         )
 

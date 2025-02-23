@@ -1,20 +1,26 @@
 // -- Inclusão de bibliotecas
 #include <stdio.h>
 #include "pico/stdlib.h"
-#include "hardware/i2c.h"
 #include "inc/ssd1306.h"
+#include "hardware/i2c.h"
 #include "hardware/adc.h"
 #include "hardware/pwm.h"
 #include "hardware/timer.h"
+#include "hardware/pio.h"
+#include "ws2812.pio.h"
 
 // -- Definição de constantes
 // GPIO
 #define button_A 5 // Botão A GPIO 5
 #define button_B 6 // Botão B GPIO 6
+#define matriz_leds 7 // Define o pino da matriz de LEDs no GPIO 7
+#define NUM_LEDS 25 // Número de LEDs na matriz
 #define buzzer_A 21 // Buzzer A GPIO 21
 #define buzzer_B 10 // Buzzer B GPIO 10
 #define LED_Green 11 // LED Verde GPIO 11
 #define LED_Red 13 // LED Vermelho GPIO 13
+#define joystick_Y 26 // Define o pino VRY do Joystick na GPIO 26
+#define joystick_X 27 // Define o pino VRX do Joystick na GPIO 27
 
 // Display I2C
 #define display_i2c_port i2c1 // Define a porta I2C
@@ -24,26 +30,129 @@
 ssd1306_t ssd; // Inicializa a estrutura do display
 
 // -- Variáveis globais
-volatile bool motor_activate = false; // Define se o motor está ou não ligado
 static volatile uint32_t last_time = 0; // Armazena o tempo do último clique dos botões
+uint16_t value_vrx; // Valor analógico do eixo X jo Joystick
+uint16_t value_vry; // Valor analógico do eixo Y jo Joystick
+
+// Funcionalidade 1
+volatile bool motor_activate = false; // Define se o motor está ou não ligado
 volatile bool confirm_B = false; // Armazena se o botão B foi clicado nos ultimos 2s
 volatile int segundos = 0; // Guarda o valor dos segundos desde a partida
 volatile int horimetro = 1485; // Guarda o valor do horimetro
-char str_horimetro[4]; // Guarda o valor do horímetro em string
 volatile int man_prev = 1500; // Guarda o valor do horímetro da próxima manutenção preventiva
-char str_man_prev[4]; // Guarda o valor da próxima manutenção preventiva em string
 
+// Funcionalidade 2
+volatile float temperatura = 0; // Guarda o valor da temperatura do motor
+volatile bool temp_alerta = false; // Guarda a informação se algum alerta de temperatura, desempenho ou vibrção foi ativado nos ultimos 5s
+
+// Funcionalidade 3
+volatile float combustivel; // Guarda o valor do nível de combustível
+volatile float last_combustivel; // Guarda o valor do último nível de combustível
+volatile float consumo; // Guarda o valor do consumo de combustível em l/h
+
+// Funcionalidade 4
+
+// Strings para o display
 char str_alerta[15]; // Guarda o valor da mensagem de alerta
+char str_horimetro[4]; // Guarda o valor do horímetro em string
+char str_man_prev[4]; // Guarda o valor da próxima manutenção preventiva em string
+char str_temperatura[3]; // Guarda o valor da temperatura em string
+char str_combustivel[3]; // Guarda o valor do nível de combustível em string
+char str_consumo[3]; // Guarda o valor do consumo em string
+
+// --- Funções necessária para a manipulação da matriz de LEDs
+// Estrutura do pixel GRB (Padrão do WS2812)
+struct pixel_t {
+    uint8_t G, R, B; // Define variáveis de 8-bits (0 a 255) para armazenar a cor
+};
+typedef struct pixel_t pixel_t;
+typedef pixel_t npLED_t; // Permite declarar variáveis utilizando apenas "npLED_t"
+
+// Declaração da Array que representa a matriz de LEDs
+npLED_t leds[NUM_LEDS];
+
+// Variáveis para máquina PIO
+PIO np_pio;
+uint sm;
+
+// Função para definir a cor de um LED específico
+void cor(const uint index, const uint8_t r, const uint8_t g, const uint8_t b) {
+    leds[index].R = r;
+    leds[index].G = g;
+    leds[index].B = b;
+}
+
+// Função para desligar todos os LEDs
+void desliga() {
+    for (uint i = 0; i < NUM_LEDS; ++i) {
+        cor(i, 0, 0, 0);
+    }
+}
+
+// Função para enviar o estado atual dos LEDs ao hardware  - buffer de saída
+void buffer() {
+    for (uint i = 0; i < NUM_LEDS; ++i) {
+        pio_sm_put_blocking(np_pio, sm, leds[i].G);
+        pio_sm_put_blocking(np_pio, sm, leds[i].R);
+        pio_sm_put_blocking(np_pio, sm, leds[i].B);
+    }
+    // sleep_us(100);
+}
+
+// Função para converter a posição da matriz para uma posição do vetor.
+int getIndex(int x, int y) {
+    // Se a linha for par (0, 2, 4), percorremos da esquerda para a direita.
+    // Se a linha for ímpar (1, 3), percorremos da direita para a esquerda.
+    if (y % 2 == 0) {
+        return 24-(y * 5 + x); // Linha par (esquerda para direita).
+    } else {
+        return 24-(y * 5 + (4 - x)); // Linha ímpar (direita para esquerda).
+    }
+}
+
+// Função para definir a frequência do som do buzzer
+void pwm_freq(uint gpio, uint freq) {
+    uint slice = pwm_gpio_to_slice_num(gpio);
+    uint clock_div = 4; // Define o divisor do clock
+    uint wrap_value = (125000000 / (clock_div * freq)) - 1; // Define o valor do Wrap
+
+    pwm_set_clkdiv(slice, clock_div); // Define o divisor do clock
+    pwm_set_wrap(slice, wrap_value); // Define o contador do PWM
+    pwm_set_chan_level(slice, pwm_gpio_to_channel(gpio), wrap_value / 2); // Duty cycle de 50%
+}
+
+// Função para ativar/desativar o buzzer
+void pwm_buzzer(uint gpio, bool active){
+    uint slice = pwm_gpio_to_slice_num(gpio);
+    pwm_set_enabled(slice, active);
+}
 
 // Função de callback do alarme
 int64_t alarm_callback(alarm_id_t id, void *user_data){
     ssd1306_draw_string(&ssd, "               ", 3, 13);
+    desliga();
+    buffer();
     confirm_B = false;
+    temp_alerta = false;
     return 0;
 }
 
+// Função de callback do alarme do buzzer
+int64_t alarm_callback_buzzer(alarm_id_t id, void *user_data){
+    pwm_buzzer(buzzer_A, false);
+    pwm_buzzer(buzzer_B, false);
+    return 0;
+}
+
+// Função para beepar o buzzer
+void beep_buzzer(uint time){
+    pwm_buzzer(buzzer_A, true);
+    pwm_buzzer(buzzer_B, true);
+    add_alarm_in_ms(time, alarm_callback_buzzer, NULL, false);
+}
+
 // Função de alerta
-void alerta(int tipo, int n){
+void alerta(int tipo, int matriz, int time){
     if(!confirm_B){
         switch (tipo){
         case 1:
@@ -53,9 +162,93 @@ void alerta(int tipo, int n){
         case 2:
             // Tipo de alerta para manutenção preventiva vencida
             ssd1306_draw_string(&ssd, "Prev vencida", 15, 13);
+            break;
+        case 3:
+            // Tipo de alerta para temperatura critica
+            ssd1306_draw_string(&ssd, "Temp critica", 15, 13);
+            break;
+        case 4:
+            // Tipo de alerta para temperatura alta
+            ssd1306_draw_string(&ssd, "Temp alta", 27, 13);
+            break;
+        case 5:
+            // Tipo de alerta para consumo elevado
+            ssd1306_draw_string(&ssd, "Cons elevado", 15, 13);
+            break;
         default:
             break;
         }
+
+        switch (matriz){
+        case 1:
+            int frame1[5][5][3] = {
+                {{0, 0, 0}, {0, 0, 0}, {100, 100, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {100, 100, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {100, 100, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 0}, {100, 100, 0}, {0, 0, 0}, {0, 0, 0}}
+            };
+            for(int linha = 0; linha < 5; linha++){
+                for(int coluna = 0; coluna < 5; coluna++){
+                  int posicao = getIndex(linha, coluna);
+                  cor(posicao, frame1[coluna][linha][0], frame1[coluna][linha][1], frame1[coluna][linha][2]);
+                }
+            };
+            buffer();
+            break;
+        case 2:
+            int frame2[5][5][3] = {
+                {{0, 0, 0}, {100, 0, 0}, {100, 0, 0}, {100, 0, 0}, {0, 0, 0}},
+                {{100, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {100, 0, 0}},  
+                {{100, 0, 0}, {100, 0, 0}, {100, 0, 0}, {100, 0, 0}, {100, 0, 0}},
+                {{100, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {100, 0, 0}},      
+                {{0, 0, 0}, {100, 0, 0}, {100, 0, 0}, {100, 0, 0}, {0, 0, 0}} 
+            };
+            for(int linha = 0; linha < 5; linha++){
+                for(int coluna = 0; coluna < 5; coluna++){
+                  int posicao = getIndex(linha, coluna);
+                  cor(posicao, frame2[coluna][linha][0], frame2[coluna][linha][1], frame2[coluna][linha][2]);
+                }
+            };
+            buffer();
+            break;
+        case 3:
+            int frame3[5][5][3] = {
+                {{0, 0, 0}, {0, 0, 100}, {0, 0, 100}, {0, 0, 100}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 100}, {0, 0, 0}, {0, 0, 100}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 100}, {0, 0, 100}, {0, 0, 100}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 100}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{0, 0, 0}, {0, 0, 100}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}}
+            };
+            for(int linha = 0; linha < 5; linha++){
+                for(int coluna = 0; coluna < 5; coluna++){
+                  int posicao = getIndex(linha, coluna);
+                  cor(posicao, frame3[coluna][linha][0], frame3[coluna][linha][1], frame3[coluna][linha][2]);
+                }
+            };
+            buffer();
+            break;
+        case 4:
+            int frame4[5][5][3] = {
+                {{100, 0, 100}, {100, 0, 100}, {100, 0, 100}, {0, 0, 0}, {100, 0, 100}},
+                {{100, 0, 100}, {0, 0, 0}, {100, 0, 100}, {0, 0, 0}, {100, 0, 100}},
+                {{100, 0, 100}, {100, 0, 100}, {100, 0, 100}, {0, 0, 0}, {100, 0, 100}},
+                {{100, 0, 100}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}},
+                {{100, 0, 100}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {100, 0, 100}}
+            };
+            for(int linha = 0; linha < 5; linha++){
+                for(int coluna = 0; coluna < 5; coluna++){
+                  int posicao = getIndex(linha, coluna);
+                  cor(posicao, frame4[coluna][linha][0], frame4[coluna][linha][1], frame4[coluna][linha][2]);
+                }
+            };
+            buffer();
+            break;
+        default:
+            break;
+        }
+
+        beep_buzzer(time);
         add_alarm_in_ms(5000, alarm_callback, NULL, false);
     }
 }
@@ -69,10 +262,20 @@ bool repeating_timer_callback(struct repeating_timer *t) {
             horimetro++;
             if(horimetro % 10 == 0 && man_prev - horimetro <= 100){
                 if(man_prev - horimetro <= 0){
-                    alerta(2, 2);
+                    alerta(2, 4, 500);
                 }else{
-                    alerta(1, 1);
+                    alerta(1, 3, 100);
                 }
+            }
+        }
+
+        last_combustivel = combustivel;
+        combustivel = (value_vrx/4095.0)*100.0; // Transforma a escala de 0 a 4095 para 0 a 305
+        consumo = (last_combustivel - combustivel)/(1800/3600.0);
+        if(!temp_alerta){
+            if(consumo > 10){
+                alerta(5, 1, 100);
+                temp_alerta = true;
             }
         }
     }
@@ -96,6 +299,7 @@ void gpio_irq_handler(uint gpio, uint32_t events){
             motor_activate = !motor_activate;
             gpio_put(LED_Green, motor_activate);
             gpio_put(LED_Red, !motor_activate);
+            temp_alerta = false;
         }else if(gpio == button_B){
             if(confirm_B){
                 man_prev += 500;
@@ -106,6 +310,33 @@ void gpio_irq_handler(uint gpio, uint32_t events){
             }
         }else if(gpio == botao){
             reset_usb_boot(0, 0);
+        }
+    }
+}
+
+// Função de alarme da temperatura
+int64_t alarm_callback_temp(alarm_id_t id, void *user_data){
+    motor_activate = false;
+    gpio_put(LED_Green, motor_activate);
+    gpio_put(LED_Red, !motor_activate);
+    return 0;
+}
+
+// Função para definir a temperatura do motor
+void temp_motor(uint16_t value_vry){
+    // Temperatura
+    temperatura = 75.0 + ((value_vry/4095.0)*30.0); // Transforma a escala de 0 a 4095 para 75 a 105
+    if(!temp_alerta){
+        if(temperatura > 100){
+            alerta(3, 2, 1000);
+            add_alarm_in_ms(5000, alarm_callback_temp, NULL, false);
+            temp_alerta = true;
+        }else if(temperatura > 95){
+            alerta(3, 2, 500);
+            temp_alerta = true;
+        }else if(temperatura > 92){
+            alerta(4, 1, 100);
+            temp_alerta = true;
         }
     }
 }
@@ -137,10 +368,37 @@ void atualizar_display(){
     sprintf(str_man_prev, "%d", man_prev); // Converte o inteiro em string
     ssd1306_draw_string(&ssd, str_man_prev, 5, 54); // Desenha uma string
 
-    ssd1306_draw_string(&ssd, "090C", 47, 34); // Desenha uma string
+    ssd1306_draw_string(&ssd, "    ", 47, 34); // Desenha uma string
+    sprintf(str_temperatura, "%.0f", temperatura); // Converte o float em string
+    if(temperatura > 99.5){
+        ssd1306_draw_string(&ssd, str_temperatura, 51, 34); // Desenha uma string
+    }else{
+        ssd1306_draw_string(&ssd, str_temperatura, 55, 34); // Desenha uma string
+    }
+
+    ssd1306_draw_string(&ssd, "   ", 94, 54); // Desenha uma string
+    sprintf(str_combustivel, "%.0f", combustivel); // Converte o float em string
+    if(combustivel > 99.5){
+        ssd1306_draw_string(&ssd, str_combustivel, 94, 54); // Desenha uma string
+    }else if(combustivel > 9.5){
+        ssd1306_draw_string(&ssd, str_combustivel, 98, 54); // Desenha uma string
+    }else{
+        ssd1306_draw_string(&ssd, str_combustivel, 102, 54); // Desenha uma string
+    }
+
+    ssd1306_draw_string(&ssd, "    ", 90, 34); // Desenha uma string
+    sprintf(str_consumo, "%.0f", consumo); // Converte float em string
+    if(consumo > 99.5){
+        ssd1306_draw_string(&ssd, str_consumo, 94, 34); // Desenha uma string
+    }else if(consumo > 9.5){
+        ssd1306_draw_string(&ssd, str_consumo, 98, 34); // Desenha uma string
+    }else if(consumo > 0.5){
+        ssd1306_draw_string(&ssd, str_consumo, 102, 34); // Desenha uma string
+    }else{
+        ssd1306_draw_string(&ssd, "0", 102, 34); // Desenha uma string
+    }
+
     ssd1306_draw_string(&ssd, "100", 51, 54); // Desenha uma string
-    ssd1306_draw_string(&ssd, "20LM", 90, 34); // Desenha uma string
-    ssd1306_draw_string(&ssd, "070", 94, 54); // Desenha uma string
 
     ssd1306_send_data(&ssd); // Atualiza o display
 }
@@ -148,7 +406,7 @@ void atualizar_display(){
 // Função principal
 int main()
 {
-    // Para ser utilizado o modo BOOTSEL com botão B
+    // Para ser utilizado o modo BOOTSEL com botão do joystick
     gpio_init(botao);
     gpio_set_dir(botao, GPIO_IN);
     gpio_pull_up(botao);
@@ -187,6 +445,25 @@ int main()
     ssd1306_fill(&ssd, false); // Limpa o display
     ssd1306_send_data(&ssd); // Atualiza o display
 
+    // PWM
+    gpio_set_function(buzzer_A, GPIO_FUNC_PWM); // Define a função da porta GPIO como PWM
+    gpio_set_function(buzzer_B, GPIO_FUNC_PWM); // Define a função da porta GPIO como PWM
+    // pwm_freq(buzzer_A, 200); // Define a frequência do buzzer A
+    // pwm_freq(buzzer_B, 200); // Define a frequência do buzzer B
+
+    // ADC
+    adc_init();
+    adc_gpio_init(joystick_Y); // Inicia o ADC para o GPIO 26 do VRY do Joystick
+    adc_gpio_init(joystick_X); // Inicia o ADC para o GPIO 27 do VRX do Joystick
+
+    // PIO
+    np_pio = pio0;
+    sm = pio_claim_unused_sm(np_pio, true);
+    uint offset = pio_add_program(pio0, &ws2818b_program);
+    ws2818b_program_init(np_pio, sm, offset, matriz_leds, 800000);
+    desliga(); // Para limpar o buffer dos LEDs
+    buffer();
+
     // Declaração de uma estrutura de temporizador de repetição.
     struct repeating_timer timer;
 
@@ -200,6 +477,14 @@ int main()
     while (true) {
         if(motor_activate){
             atualizar_display();
+
+            // Faz a leitura ADC dos joysticks
+            adc_select_input(0); // Seleciona o ADC0 referente ao VRY do Joystick (GPIO 26)
+            value_vry = adc_read(); // Ler o valor do ADC selecionado (ADC0 - VRY) e guarda
+            adc_select_input(1); // Seleciona o ADC1 referente ao VRX do Joystick (GPIO 27)
+            value_vrx = adc_read(); // Ler o valor do ADC selecionado (ADC1 - VRX) e guarda
+            // Função para definir a temperatura e desempenho do motor
+            temp_motor(value_vry);
         }
         sleep_ms(100);
     }

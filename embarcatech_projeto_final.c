@@ -123,6 +123,10 @@ int getIndex(int x, int y) {
 
 
 
+void pwm_buzzer(uint gpio, bool active); // Esta função precisa ser declarada antes dos alarmes
+
+
+
 // --- Funções de alarme
 
 // Função de callback do alarme

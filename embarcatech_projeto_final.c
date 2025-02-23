@@ -8,6 +8,7 @@
 #include "hardware/timer.h"
 #include "hardware/pio.h"
 #include "ws2812.pio.h"
+#include "pico/bootrom.h"
 
 // -- Definição de constantes
 // GPIO
@@ -19,6 +20,7 @@
 #define buzzer_B 10 // Buzzer B GPIO 10
 #define LED_Green 11 // LED Verde GPIO 11
 #define LED_Red 13 // LED Vermelho GPIO 13
+#define joystick_PB 22 // Botão do joystick GPjoystick_PB
 #define joystick_Y 26 // VRY do Joystick GPIO 26
 #define joystick_X 27 // VRX do Joystick GPIO 27
 #define mic 28 // Mic GPIO 28
@@ -32,9 +34,6 @@ ssd1306_t ssd; // Inicializa a estrutura do display
 
 // -- Variáveis globais
 static volatile uint32_t last_time = 0; // Armazena o tempo do último clique dos botões
-uint16_t value_vrx; // Valor analógico do eixo X jo Joystick
-uint16_t value_vry; // Valor analógico do eixo Y jo Joystick
-uint16_t value_mic; // Valor analógico do mic
 
 // Funcionalidade 1
 volatile bool motor_activate = false; // Define se o motor está ou não ligado
@@ -44,15 +43,18 @@ volatile int horimetro = 1485; // Guarda o valor do horimetro
 volatile int man_prev = 1500; // Guarda o valor do horímetro da próxima manutenção preventiva
 
 // Funcionalidade 2
+uint16_t value_vry; // Valor analógico do eixo Y jo Joystick
 volatile float temperatura = 0; // Guarda o valor da temperatura do motor
 volatile bool temp_alerta = false; // Guarda a informação se algum alerta de temperatura, desempenho ou vibrção foi ativado nos ultimos 5s
 
 // Funcionalidade 3
+uint16_t value_vrx; // Valor analógico do eixo X jo Joystick
 volatile float combustivel; // Guarda o valor do nível de combustível
 volatile float last_combustivel; // Guarda o valor do último nível de combustível
 volatile float consumo; // Guarda o valor do consumo de combustível em l/h
 
 // Funcionalidade 4
+uint16_t value_mic; // Valor analógico do mic
 volatile float vibracao = 0; // Guarda o valor da vibração do motor
 
 // Strings para o display
@@ -64,7 +66,10 @@ char str_combustivel[3]; // Guarda o valor do nível de combustível em string
 char str_consumo[3]; // Guarda o valor do consumo em string
 char str_vibracao[3]; // Guarda o valor da vibração em string
 
+
+
 // --- Funções necessária para a manipulação da matriz de LEDs
+
 // Estrutura do pixel GRB (Padrão do WS2812)
 struct pixel_t {
     uint8_t G, R, B; // Define variáveis de 8-bits (0 a 255) para armazenar a cor
@@ -114,22 +119,11 @@ int getIndex(int x, int y) {
     }
 }
 
-// Função para definir a frequência do som do buzzer
-void pwm_freq(uint gpio, uint freq) {
-    uint slice = pwm_gpio_to_slice_num(gpio);
-    uint clock_div = 4; // Define o divisor do clock
-    uint wrap_value = (125000000 / (clock_div * freq)) - 1; // Define o valor do Wrap
+// --- Final das funções necessária para a manipulação da matriz de LEDs
 
-    pwm_set_clkdiv(slice, clock_div); // Define o divisor do clock
-    pwm_set_wrap(slice, wrap_value); // Define o contador do PWM
-    pwm_set_chan_level(slice, pwm_gpio_to_channel(gpio), wrap_value / 2); // Duty cycle de 50%
-}
 
-// Função para ativar/desativar o buzzer
-void pwm_buzzer(uint gpio, bool active){
-    uint slice = pwm_gpio_to_slice_num(gpio);
-    pwm_set_enabled(slice, active);
-}
+
+// --- Funções de alarme
 
 // Função de callback do alarme
 int64_t alarm_callback(alarm_id_t id, void *user_data){
@@ -148,12 +142,47 @@ int64_t alarm_callback_buzzer(alarm_id_t id, void *user_data){
     return 0;
 }
 
+// Função de alarme da temperatura
+int64_t alarm_callback_temp(alarm_id_t id, void *user_data){
+    motor_activate = false;
+    gpio_put(LED_Green, motor_activate);
+    gpio_put(LED_Red, !motor_activate);
+    return 0;
+}
+
+// --- Final das funções de alarme
+
+
+
+// --- Funções para configurar e beepar o buzzer
+
+// Função para definir a frequência do som do buzzer
+void pwm_freq(uint gpio, uint freq) {
+    uint slice = pwm_gpio_to_slice_num(gpio);
+    uint clock_div = 4; // Define o divisor do clock
+    uint wrap_value = (125000000 / (clock_div * freq)) - 1; // Define o valor do Wrap
+
+    pwm_set_clkdiv(slice, clock_div); // Define o divisor do clock
+    pwm_set_wrap(slice, wrap_value); // Define o contador do PWM
+    pwm_set_chan_level(slice, pwm_gpio_to_channel(gpio), wrap_value / 2); // Duty cycle de 50%
+}
+
+// Função para ativar/desativar o buzzer
+void pwm_buzzer(uint gpio, bool active){
+    uint slice = pwm_gpio_to_slice_num(gpio);
+    pwm_set_enabled(slice, active);
+}
+
 // Função para beepar o buzzer
 void beep_buzzer(uint time){
     pwm_buzzer(buzzer_A, true);
     pwm_buzzer(buzzer_B, true);
     add_alarm_in_ms(time, alarm_callback_buzzer, NULL, false);
 }
+
+// --- Final das funções para configurar e beepar o buzzer
+
+
 
 // Função de alerta
 void alerta(int tipo, int matriz, int time){
@@ -261,7 +290,7 @@ void alerta(int tipo, int matriz, int time){
     }
 }
 
-// Função de callback do temporizador
+// Função de callback do temporizador (horímetro + consumo)
 bool repeating_timer_callback(struct repeating_timer *t) {
     if(motor_activate){
         segundos += 1800;
@@ -294,43 +323,7 @@ bool repeating_timer_callback(struct repeating_timer *t) {
     return true;
 }
 
-//Trecho para modo BOOTSEL com botão B
-#include "pico/bootrom.h"
-#define botao 22
-
-// Função de interrupção dos botões
-void gpio_irq_handler(uint gpio, uint32_t events){
-    //Debouncing
-    uint32_t current_time = to_us_since_boot(get_absolute_time()); // Pega o tempo atual e transforma em us
-    if(current_time - last_time > 1000000){
-        if(gpio == button_A){
-            motor_activate = !motor_activate;
-            gpio_put(LED_Green, motor_activate);
-            gpio_put(LED_Red, !motor_activate);
-            temp_alerta = false;
-        }else if(gpio == button_B){
-            if(confirm_B){
-                man_prev += 500;
-            }else{
-                confirm_B = true;
-                ssd1306_draw_string(&ssd, "Confirma?", 27, 13);
-                add_alarm_in_ms(2000, alarm_callback, NULL, false);
-            }
-        }else if(gpio == botao){
-            reset_usb_boot(0, 0);
-        }
-    }
-}
-
-// Função de alarme da temperatura
-int64_t alarm_callback_temp(alarm_id_t id, void *user_data){
-    motor_activate = false;
-    gpio_put(LED_Green, motor_activate);
-    gpio_put(LED_Red, !motor_activate);
-    return 0;
-}
-
-// Função para definir a temperatura do motor
+// Função para definir a temperatura e a vibração do motor
 void temp_vib_motor(uint16_t value_vry, uint16_t value_mic){
     // Temperatura
     temperatura = 75.0 + ((value_vry/4095.0)*30.0); // Transforma a escala de 0 a 4095 para 75 a 105
@@ -356,6 +349,30 @@ void temp_vib_motor(uint16_t value_vry, uint16_t value_mic){
     }
 }
 
+// Função de interrupção dos botões
+void gpio_irq_handler(uint gpio, uint32_t events){
+    //Debouncing
+    uint32_t current_time = to_us_since_boot(get_absolute_time()); // Pega o tempo atual e transforma em us
+    if(current_time - last_time > 1000000){
+        if(gpio == button_A){
+            motor_activate = !motor_activate;
+            gpio_put(LED_Green, motor_activate);
+            gpio_put(LED_Red, !motor_activate);
+            temp_alerta = false;
+        }else if(gpio == button_B){
+            if(confirm_B){
+                man_prev += 500;
+            }else{
+                confirm_B = true;
+                ssd1306_draw_string(&ssd, "Confirma?", 27, 13);
+                add_alarm_in_ms(2000, alarm_callback, NULL, false);
+            }
+        }else if(gpio == joystick_PB){
+            reset_usb_boot(0, 0);
+        }
+    }
+}
+
 // Função para atualizar o display
 void atualizar_display(){
 
@@ -378,11 +395,13 @@ void atualizar_display(){
 
     // Escritas variáveis
 
+    // Horimetro
     sprintf(str_horimetro, "%d", horimetro); // Converte o inteiro em string
     ssd1306_draw_string(&ssd, str_horimetro, 5, 34); // Desenha uma string
+    // Horimetro da proxima manutenção preventiva
     sprintf(str_man_prev, "%d", man_prev); // Converte o inteiro em string
     ssd1306_draw_string(&ssd, str_man_prev, 5, 54); // Desenha uma string
-
+    // Temperatura
     ssd1306_draw_string(&ssd, "    ", 47, 34); // Desenha uma string
     sprintf(str_temperatura, "%.0f", temperatura); // Converte o float em string
     if(temperatura > 99.5){
@@ -390,17 +409,17 @@ void atualizar_display(){
     }else{
         ssd1306_draw_string(&ssd, str_temperatura, 55, 34); // Desenha uma string
     }
-
-    ssd1306_draw_string(&ssd, "   ", 94, 54); // Desenha uma string
-    sprintf(str_combustivel, "%.0f", combustivel); // Converte o float em string
-    if(combustivel > 99.5){
-        ssd1306_draw_string(&ssd, str_combustivel, 94, 54); // Desenha uma string
-    }else if(combustivel > 9.5){
-        ssd1306_draw_string(&ssd, str_combustivel, 98, 54); // Desenha uma string
+    // Vibração
+    ssd1306_draw_string(&ssd, "   ", 51, 54); // Desenha uma string
+    sprintf(str_vibracao, "%0.f", vibracao);
+    if(vibracao > 99.5){
+        ssd1306_draw_string(&ssd, str_vibracao, 51, 54); // Desenha uma string
+    }else if(vibracao > 9.5){
+        ssd1306_draw_string(&ssd, str_vibracao, 55, 54); // Desenha uma string
     }else{
-        ssd1306_draw_string(&ssd, str_combustivel, 102, 54); // Desenha uma string
+        ssd1306_draw_string(&ssd, str_vibracao, 59, 54); // Desenha uma string
     }
-
+    // Consumo
     ssd1306_draw_string(&ssd, "    ", 90, 34); // Desenha uma string
     sprintf(str_consumo, "%.0f", consumo); // Converte float em string
     if(consumo > 99.5){
@@ -412,15 +431,15 @@ void atualizar_display(){
     }else{
         ssd1306_draw_string(&ssd, "0", 102, 34); // Desenha uma string
     }
-
-    ssd1306_draw_string(&ssd, "   ", 51, 54); // Desenha uma string
-    sprintf(str_vibracao, "%0.f", vibracao);
-    if(vibracao > 99.5){
-        ssd1306_draw_string(&ssd, str_vibracao, 51, 54); // Desenha uma string
-    }else if(vibracao > 9.5){
-        ssd1306_draw_string(&ssd, str_vibracao, 55, 54); // Desenha uma string
+    // Combustivel
+    ssd1306_draw_string(&ssd, "   ", 94, 54); // Desenha uma string
+    sprintf(str_combustivel, "%.0f", combustivel); // Converte o float em string
+    if(combustivel > 99.5){
+        ssd1306_draw_string(&ssd, str_combustivel, 94, 54); // Desenha uma string
+    }else if(combustivel > 9.5){
+        ssd1306_draw_string(&ssd, str_combustivel, 98, 54); // Desenha uma string
     }else{
-        ssd1306_draw_string(&ssd, str_vibracao, 59, 54); // Desenha uma string
+        ssd1306_draw_string(&ssd, str_combustivel, 102, 54); // Desenha uma string
     }
 
     ssd1306_send_data(&ssd); // Atualiza o display
@@ -429,24 +448,22 @@ void atualizar_display(){
 // Função principal
 int main()
 {
-    // Para ser utilizado o modo BOOTSEL com botão do joystick
-    gpio_init(botao);
-    gpio_set_dir(botao, GPIO_IN);
-    gpio_pull_up(botao);
-    gpio_set_irq_enabled_with_callback(botao, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
-
     // -- Inicializações
     // Monitor serial
     stdio_init_all();
-
+    
     // GPIO
     gpio_init(button_A); // Inicia a GPIO 5 do botão A
     gpio_set_dir(button_A, GPIO_IN); // Define a direção da GPIO 5 do botão A como entrada
     gpio_pull_up(button_A); // Habilita o resistor de pull up da GPIO 5 do botão A
-
+    
     gpio_init(button_B); // Inicia a GPIO 6 do botão B
     gpio_set_dir(button_B, GPIO_IN); // Define a direção da GPIO 6 do botão B como entrada
     gpio_pull_up(button_B); // Habilita o resistor de pull up da GPIO 6 do botão B
+
+    gpio_init(joystick_PB); // Inicia a GPIO 22 do botão do Joystick
+    gpio_set_dir(joystick_PB, GPIO_IN); // Define a direção da GPIO 22 do botão do Joystick como entrada
+    gpio_pull_up(joystick_PB); // Habilita o resistor de pull up da GPIO 22 do botão do Joystick
 
     gpio_init(LED_Green); // Inicia a GPIO 11 do LED Verde
     gpio_set_dir(LED_Green, GPIO_OUT); // Define a direção da GPIO 11 do LED Verde como saída
@@ -471,8 +488,8 @@ int main()
     // PWM
     gpio_set_function(buzzer_A, GPIO_FUNC_PWM); // Define a função da porta GPIO como PWM
     gpio_set_function(buzzer_B, GPIO_FUNC_PWM); // Define a função da porta GPIO como PWM
-    // pwm_freq(buzzer_A, 200); // Define a frequência do buzzer A
-    // pwm_freq(buzzer_B, 200); // Define a frequência do buzzer B
+    pwm_freq(buzzer_A, 200); // Define a frequência do buzzer A
+    pwm_freq(buzzer_B, 200); // Define a frequência do buzzer B
 
     // ADC
     adc_init();
@@ -497,12 +514,13 @@ int main()
     // Interrupção dos botões
     gpio_set_irq_enabled_with_callback(button_A, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
     gpio_set_irq_enabled_with_callback(button_B, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
+    gpio_set_irq_enabled_with_callback(joystick_PB, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
 
     while (true) {
         if(motor_activate){
             atualizar_display();
 
-            // Faz a leitura ADC dos joysticks
+            // Faz a leitura ADC dos joysticks e do mic
             adc_select_input(0); // Seleciona o ADC0 referente ao VRY do Joystick (GPIO 26)
             value_vry = adc_read(); // Ler o valor do ADC selecionado (ADC0 - VRY) e guarda
             adc_select_input(1); // Seleciona o ADC1 referente ao VRX do Joystick (GPIO 27)

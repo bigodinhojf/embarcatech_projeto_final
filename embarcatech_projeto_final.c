@@ -13,14 +13,15 @@
 // GPIO
 #define button_A 5 // Botão A GPIO 5
 #define button_B 6 // Botão B GPIO 6
-#define matriz_leds 7 // Define o pino da matriz de LEDs no GPIO 7
+#define matriz_leds 7 // Matriz de LEDs GPIO 7
 #define NUM_LEDS 25 // Número de LEDs na matriz
 #define buzzer_A 21 // Buzzer A GPIO 21
 #define buzzer_B 10 // Buzzer B GPIO 10
 #define LED_Green 11 // LED Verde GPIO 11
 #define LED_Red 13 // LED Vermelho GPIO 13
-#define joystick_Y 26 // Define o pino VRY do Joystick na GPIO 26
-#define joystick_X 27 // Define o pino VRX do Joystick na GPIO 27
+#define joystick_Y 26 // VRY do Joystick GPIO 26
+#define joystick_X 27 // VRX do Joystick GPIO 27
+#define mic 28 // Mic GPIO 28
 
 // Display I2C
 #define display_i2c_port i2c1 // Define a porta I2C
@@ -33,6 +34,7 @@ ssd1306_t ssd; // Inicializa a estrutura do display
 static volatile uint32_t last_time = 0; // Armazena o tempo do último clique dos botões
 uint16_t value_vrx; // Valor analógico do eixo X jo Joystick
 uint16_t value_vry; // Valor analógico do eixo Y jo Joystick
+uint16_t value_mic; // Valor analógico do mic
 
 // Funcionalidade 1
 volatile bool motor_activate = false; // Define se o motor está ou não ligado
@@ -51,6 +53,7 @@ volatile float last_combustivel; // Guarda o valor do último nível de combust�
 volatile float consumo; // Guarda o valor do consumo de combustível em l/h
 
 // Funcionalidade 4
+volatile float vibracao = 0; // Guarda o valor da vibração do motor
 
 // Strings para o display
 char str_alerta[15]; // Guarda o valor da mensagem de alerta
@@ -59,6 +62,7 @@ char str_man_prev[4]; // Guarda o valor da próxima manutenção preventiva em s
 char str_temperatura[3]; // Guarda o valor da temperatura em string
 char str_combustivel[3]; // Guarda o valor do nível de combustível em string
 char str_consumo[3]; // Guarda o valor do consumo em string
+char str_vibracao[3]; // Guarda o valor da vibração em string
 
 // --- Funções necessária para a manipulação da matriz de LEDs
 // Estrutura do pixel GRB (Padrão do WS2812)
@@ -174,6 +178,10 @@ void alerta(int tipo, int matriz, int time){
         case 5:
             // Tipo de alerta para consumo elevado
             ssd1306_draw_string(&ssd, "Cons elevado", 15, 13);
+            break;
+        case 6:
+            // Tipo de alerta para vibração anormal
+            ssd1306_draw_string(&ssd, "Vib anormal", 19, 13);
             break;
         default:
             break;
@@ -323,7 +331,7 @@ int64_t alarm_callback_temp(alarm_id_t id, void *user_data){
 }
 
 // Função para definir a temperatura do motor
-void temp_motor(uint16_t value_vry){
+void temp_vib_motor(uint16_t value_vry, uint16_t value_mic){
     // Temperatura
     temperatura = 75.0 + ((value_vry/4095.0)*30.0); // Transforma a escala de 0 a 4095 para 75 a 105
     if(!temp_alerta){
@@ -338,6 +346,13 @@ void temp_motor(uint16_t value_vry){
             alerta(4, 1, 100);
             temp_alerta = true;
         }
+    }
+
+    // Vibração
+    vibracao = (value_mic/4095.0)*100; // Transforma a escala de 0 a 4095 para 0 a 100
+    if(!temp_alerta && vibracao > 75){
+        alerta(6, 1, 100);
+        temp_alerta = true;
     }
 }
 
@@ -398,7 +413,15 @@ void atualizar_display(){
         ssd1306_draw_string(&ssd, "0", 102, 34); // Desenha uma string
     }
 
-    ssd1306_draw_string(&ssd, "100", 51, 54); // Desenha uma string
+    ssd1306_draw_string(&ssd, "   ", 51, 54); // Desenha uma string
+    sprintf(str_vibracao, "%0.f", vibracao);
+    if(vibracao > 99.5){
+        ssd1306_draw_string(&ssd, str_vibracao, 51, 54); // Desenha uma string
+    }else if(vibracao > 9.5){
+        ssd1306_draw_string(&ssd, str_vibracao, 55, 54); // Desenha uma string
+    }else{
+        ssd1306_draw_string(&ssd, str_vibracao, 59, 54); // Desenha uma string
+    }
 
     ssd1306_send_data(&ssd); // Atualiza o display
 }
@@ -455,6 +478,7 @@ int main()
     adc_init();
     adc_gpio_init(joystick_Y); // Inicia o ADC para o GPIO 26 do VRY do Joystick
     adc_gpio_init(joystick_X); // Inicia o ADC para o GPIO 27 do VRX do Joystick
+    adc_gpio_init(mic); // Inicia o ADC para o GPIO 28 do Mic
 
     // PIO
     np_pio = pio0;
@@ -483,8 +507,12 @@ int main()
             value_vry = adc_read(); // Ler o valor do ADC selecionado (ADC0 - VRY) e guarda
             adc_select_input(1); // Seleciona o ADC1 referente ao VRX do Joystick (GPIO 27)
             value_vrx = adc_read(); // Ler o valor do ADC selecionado (ADC1 - VRX) e guarda
-            // Função para definir a temperatura e desempenho do motor
-            temp_motor(value_vry);
+            adc_select_input(2); // Seleciona o ADC1 referente ao VRX do Joystick (GPIO 28)
+            value_mic = adc_read(); // Ler o valor do ADC selecionado (ADC2 - MIC) e guarda
+
+            // Função para definir a temperatura e vibração do motor
+            temp_vib_motor(value_vry, value_mic);
+
         }
         sleep_ms(100);
     }

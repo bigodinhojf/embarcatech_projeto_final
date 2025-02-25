@@ -37,15 +37,15 @@ static volatile uint32_t last_time = 0; // Armazena o tempo do último clique do
 
 // Funcionalidade 1
 volatile bool motor_activate = false; // Define se o motor está ou não ligado
-volatile bool confirm_B = false; // Armazena se o botão B foi clicado nos ultimos 2s
+volatile bool confirm_B = false; // Armazena se o botão B foi clicado nos últimos 2s
 volatile int segundos = 0; // Guarda o valor dos segundos desde a partida
-volatile int horimetro = 1485; // Guarda o valor do horimetro
+volatile int horimetro = 1485; // Guarda o valor do horímetro
 volatile int man_prev = 1500; // Guarda o valor do horímetro da próxima manutenção preventiva
 
 // Funcionalidade 2
 uint16_t value_vry; // Valor analógico do eixo Y jo Joystick
 volatile float temperatura = 0; // Guarda o valor da temperatura do motor
-volatile bool temp_alerta = false; // Guarda a informação se algum alerta de temperatura, desempenho ou vibrção foi ativado nos ultimos 5s
+volatile bool temp_alerta = false; // Guarda a informação se algum alerta de temperatura, desempenho ou vibração foi ativado nos últimos 5s
 
 // Funcionalidade 3
 uint16_t value_vrx; // Valor analógico do eixo X jo Joystick
@@ -105,7 +105,6 @@ void buffer() {
         pio_sm_put_blocking(np_pio, sm, leds[i].R);
         pio_sm_put_blocking(np_pio, sm, leds[i].B);
     }
-    // sleep_us(100);
 }
 
 // Função para converter a posição da matriz para uma posição do vetor.
@@ -168,7 +167,7 @@ void pwm_freq(uint gpio, uint freq) {
 
     pwm_set_clkdiv(slice, clock_div); // Define o divisor do clock
     pwm_set_wrap(slice, wrap_value); // Define o contador do PWM
-    pwm_set_chan_level(slice, pwm_gpio_to_channel(gpio), wrap_value / 2); // Duty cycle de 50%
+    pwm_set_chan_level(slice, pwm_gpio_to_channel(gpio), wrap_value / 2); // Duty cycle de 50% (Volume)
 }
 
 // Função para ativar/desativar o buzzer
@@ -222,6 +221,7 @@ void alerta(int tipo, int matriz, int time){
 
         switch (matriz){
         case 1:
+            // Símbolo para alerta "!" Amarelo
             int frame1[5][5][3] = {
                 {{0, 0, 0}, {0, 0, 0}, {100, 100, 0}, {0, 0, 0}, {0, 0, 0}},
                 {{0, 0, 0}, {0, 0, 0}, {100, 100, 0}, {0, 0, 0}, {0, 0, 0}},
@@ -238,6 +238,7 @@ void alerta(int tipo, int matriz, int time){
             buffer();
             break;
         case 2:
+            // Símbolo para alerta crítico "θ" vermelho
             int frame2[5][5][3] = {
                 {{0, 0, 0}, {100, 0, 0}, {100, 0, 0}, {100, 0, 0}, {0, 0, 0}},
                 {{100, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {100, 0, 0}},  
@@ -254,6 +255,7 @@ void alerta(int tipo, int matriz, int time){
             buffer();
             break;
         case 3:
+            // Símbolo para preventiva próxima "P" azul
             int frame3[5][5][3] = {
                 {{0, 0, 0}, {0, 0, 100}, {0, 0, 100}, {0, 0, 100}, {0, 0, 0}},
                 {{0, 0, 0}, {0, 0, 100}, {0, 0, 0}, {0, 0, 100}, {0, 0, 0}},
@@ -270,6 +272,7 @@ void alerta(int tipo, int matriz, int time){
             buffer();
             break;
         case 4:
+            // Símbolo para preventiva vencida "P!" lilás
             int frame4[5][5][3] = {
                 {{100, 0, 100}, {100, 0, 100}, {100, 0, 100}, {0, 0, 0}, {100, 0, 100}},
                 {{100, 0, 100}, {0, 0, 0}, {100, 0, 100}, {0, 0, 0}, {100, 0, 100}},
@@ -311,18 +314,15 @@ bool repeating_timer_callback(struct repeating_timer *t) {
         }
 
         last_combustivel = combustivel;
-        combustivel = (value_vrx/4095.0)*100.0; // Transforma a escala de 0 a 4095 para 0 a 305
+        combustivel = (value_vrx/4095.0)*305.0; // Transforma a escala de 0 a 4095 para 0 a 305
         consumo = (last_combustivel - combustivel)/(1800/3600.0);
         if(!temp_alerta){
-            if(consumo > 10){
+            if(consumo > 25){
                 alerta(5, 1, 100);
                 temp_alerta = true;
             }
         }
     }
-
-    printf("Segundos: %d Horimetro: %d\n", segundos, horimetro);
-
     // Retorna true para manter o temporizador repetindo
     return true;
 }
@@ -391,7 +391,7 @@ void atualizar_display(){
     // Escritas fixas
     ssd1306_draw_string(&ssd, "MANUTENCAO", 23, 2); // Desenha uma string
     ssd1306_draw_string(&ssd, "HOR", 9, 24); // Desenha uma string
-    ssd1306_draw_string(&ssd, "PRED", 5, 45); // Desenha uma string
+    ssd1306_draw_string(&ssd, "PREV", 5, 45); // Desenha uma string
     ssd1306_draw_string(&ssd, "TEMP", 47, 24); // Desenha uma string
     ssd1306_draw_string(&ssd, "VIB", 51, 45); // Desenha uma string
     ssd1306_draw_string(&ssd, "CONS", 90, 24); // Desenha uma string
@@ -450,8 +450,7 @@ void atualizar_display(){
 }
 
 // Função principal
-int main()
-{
+int main(){
     // -- Inicializações
     // Monitor serial
     stdio_init_all();
@@ -492,8 +491,8 @@ int main()
     // PWM
     gpio_set_function(buzzer_A, GPIO_FUNC_PWM); // Define a função da porta GPIO como PWM
     gpio_set_function(buzzer_B, GPIO_FUNC_PWM); // Define a função da porta GPIO como PWM
-    pwm_freq(buzzer_A, 200); // Define a frequência do buzzer A
-    pwm_freq(buzzer_B, 200); // Define a frequência do buzzer B
+    pwm_freq(buzzer_A, 1000); // Define a frequência do buzzer A
+    pwm_freq(buzzer_B, 1000); // Define a frequência do buzzer B
 
     // ADC
     adc_init();
@@ -512,7 +511,7 @@ int main()
     // Declaração de uma estrutura de temporizador de repetição.
     struct repeating_timer timer;
 
-    // Configura o temporizador para chamar a função de callback a cada 3 segundos.
+    // Configura o temporizador para chamar a função de callback a cada 1 segundo.
     add_repeating_timer_ms(1000, repeating_timer_callback, NULL, &timer);
 
     // Interrupção dos botões
@@ -520,6 +519,7 @@ int main()
     gpio_set_irq_enabled_with_callback(button_B, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
     gpio_set_irq_enabled_with_callback(joystick_PB, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
 
+    // Loop principal
     while (true) {
         if(motor_activate){
             atualizar_display();
@@ -534,7 +534,6 @@ int main()
 
             // Função para definir a temperatura e vibração do motor
             temp_vib_motor(value_vry, value_mic);
-
         }
         sleep_ms(100);
     }

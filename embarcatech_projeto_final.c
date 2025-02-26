@@ -535,6 +535,9 @@ int main(){
             // Função para definir a temperatura e vibração do motor
             temp_vib_motor(value_vry, value_mic);
         }
+
+        printf("Hor: %d - Temp: %.0f (VRY: %d) - Vib: %.0f (MIC: %d) - Comb: %.0f (VRX: %d) - Cons: %.0f\n", horimetro, temperatura, value_vry, vibracao, value_mic, combustivel, value_vrx, consumo);
+
         sleep_ms(100);
     }
 }
